@@ -915,8 +915,8 @@ public class XposedHelpers {
 			try {
 				method = findMethodExact(clazz, methodName, args);
 				// subclass cannot call supclass's private method
-				if (!Modifier.isPrivate(method.getModifiers())) {
-					break;
+				if (Modifier.isPrivate(method.getModifiers())) {
+					method = null;
 				}
 			} catch (NoSuchMethodError e) {
 			}
@@ -974,8 +974,8 @@ public class XposedHelpers {
 			try {
 				method = findMethodExact(clazz, methodName, parameterTypes, args);
 				// subclass cannot call supclass's private method
-				if (!Modifier.isPrivate(method.getModifiers())) {
-					break;
+				if (Modifier.isPrivate(method.getModifiers())) {
+					method = null;
 				}
 			} catch (NoSuchMethodError e) {
 			}
@@ -1030,8 +1030,8 @@ public class XposedHelpers {
 			try {
 				method = findMethodExact(clazz, methodName, args);
 				// subclass cannot call supclass's private method
-				if (!Modifier.isPrivate(method.getModifiers())) {
-					break;
+				if (Modifier.isPrivate(method.getModifiers())) {
+					method = null;
 				}
 			} catch (NoSuchMethodError e) {
 			}
@@ -1088,8 +1088,8 @@ public class XposedHelpers {
 			try {
 				method = findMethodExact(clazz, methodName, parameterTypes, args);
 				// subclass cannot call supclass's private method
-				if (!Modifier.isPrivate(method.getModifiers())) {
-					break;
+				if (Modifier.isPrivate(method.getModifiers())) {
+					method = null;
 				}
 			} catch (NoSuchMethodError e) {
 			}
