@@ -8,6 +8,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -885,7 +886,7 @@ public class XposedHelpers {
 	 * Call instance or static method <code>methodName</code> for object <code>obj</code> with the arguments
 	 * <code>args</code>. The types for the arguments will be determined automaticall from <code>args</code>
 	 */
-	public static Object callMethod(Object obj, String methodName, Object... args) {
+	public static Object callMethodBestMatch(Object obj, String methodName, Object... args) {
 		try {
 			return findMethodBestMatch(obj.getClass(), methodName, args).invoke(obj, args);
 		} catch (IllegalAccessException e) {
@@ -899,13 +900,52 @@ public class XposedHelpers {
 		}
 	}
 	
+	public static Object callMethod(Object obj, String methodName, Object... args) {
+		Method method = null;
+		Class<?> clazz = obj.getClass();
+		NoSuchMethodError noSuchMethodError = null;
+
+		try {
+			method = findMethodBestMatch(clazz, methodName, args);
+		} catch (NoSuchMethodError e) {
+			noSuchMethodError = e;
+		}
+
+		while (method == null && (clazz = clazz.getSuperclass()) != null) {
+			try {
+				method = findMethodExact(clazz, methodName, args);
+				// subclass cannot call supclass's private method
+				if (!Modifier.isPrivate(method.getModifiers())) {
+					break;
+				}
+			} catch (NoSuchMethodError e) {
+			}
+		}
+
+		if (method == null) {
+			throw noSuchMethodError;
+		}
+
+		try {
+			return method.invoke(obj, args);
+		} catch (IllegalAccessException e) {
+			// should not happen
+			XposedBridge.log(e);
+			throw new IllegalAccessError(e.getMessage());
+		} catch (IllegalArgumentException e) {
+			throw e;
+		} catch (InvocationTargetException e) {
+			throw new InvocationTargetError(e.getCause());
+		}
+	}
+
 	/**
 	 * Call instance or static method <code>methodName</code> for object <code>obj</code> with the arguments
 	 * <code>args</code>. The types for the arguments will be taken from <code>parameterTypes</code>.
 	 * This array can have items that are <code>null</code>. In this case, the type for this parameter
 	 * is determined from <code>args</code>.
 	 */
-	public static Object callMethod(Object obj, String methodName, Class<?>[] parameterTypes, Object... args) {
+	public static Object callMethodBestMatch(Object obj, String methodName, Class<?>[] parameterTypes, Object... args) {
 		try {
 			return findMethodBestMatch(obj.getClass(), methodName, parameterTypes, args).invoke(obj, args);
 		} catch (IllegalAccessException e) {
@@ -919,11 +959,50 @@ public class XposedHelpers {
 		}
 	}
 	
+	public static Object callMethod(Object obj, String methodName, Class<?>[] parameterTypes, Object... args) {
+		Method method = null;
+		Class<?> clazz = obj.getClass();
+		NoSuchMethodError noSuchMethodError = null;
+
+		try {
+			method = findMethodBestMatch(clazz, methodName, parameterTypes, args);
+		} catch (NoSuchMethodError e) {
+			noSuchMethodError = e;
+		}
+
+		while (method == null && (clazz = clazz.getSuperclass()) != null) {
+			try {
+				method = findMethodExact(clazz, methodName, parameterTypes, args);
+				// subclass cannot call supclass's private method
+				if (!Modifier.isPrivate(method.getModifiers())) {
+					break;
+				}
+			} catch (NoSuchMethodError e) {
+			}
+		}
+
+		if (method == null) {
+			throw noSuchMethodError;
+		}
+
+		try {
+			return method.invoke(obj, args);
+		} catch (IllegalAccessException e) {
+			// should not happen
+			XposedBridge.log(e);
+			throw new IllegalAccessError(e.getMessage());
+		} catch (IllegalArgumentException e) {
+			throw e;
+		} catch (InvocationTargetException e) {
+			throw new InvocationTargetError(e.getCause());
+		}
+	}
+
 	/**
 	 * Call static method <code>methodName</code> for class <code>clazz</code> with the arguments
 	 * <code>args</code>. The types for the arguments will be determined automaticall from <code>args</code>
 	 */
-	public static Object callStaticMethod(Class<?> clazz, String methodName, Object... args) {
+	public static Object callStaticMethodBestMatch(Class<?> clazz, String methodName, Object... args) {
 		try {
 			return findMethodBestMatch(clazz, methodName, args).invoke(null, args);
 		} catch (IllegalAccessException e) {
@@ -937,13 +1016,51 @@ public class XposedHelpers {
 		}
 	}
 	
+	public static Object callStaticMethod(Class<?> clazz, String methodName, Object... args) {
+		Method method = null;
+		NoSuchMethodError noSuchMethodError = null;
+
+		try {
+			method = findMethodBestMatch(clazz, methodName, args);
+		} catch (NoSuchMethodError e) {
+			noSuchMethodError = e;
+		}
+
+		while (method == null && (clazz = clazz.getSuperclass()) != null) {
+			try {
+				method = findMethodExact(clazz, methodName, args);
+				// subclass cannot call supclass's private method
+				if (!Modifier.isPrivate(method.getModifiers())) {
+					break;
+				}
+			} catch (NoSuchMethodError e) {
+			}
+		}
+
+		if (method == null) {
+			throw noSuchMethodError;
+		}
+
+		try {
+			return method.invoke(null, args);
+		} catch (IllegalAccessException e) {
+			// should not happen
+			XposedBridge.log(e);
+			throw new IllegalAccessError(e.getMessage());
+		} catch (IllegalArgumentException e) {
+			throw e;
+		} catch (InvocationTargetException e) {
+			throw new InvocationTargetError(e.getCause());
+		}
+	}
+
 	/**
 	 * Call static method <code>methodName</code> for class <code>clazz</code> with the arguments
 	 * <code>args</code>. The types for the arguments will be taken from <code>parameterTypes</code>.
 	 * This array can have items that are <code>null</code>. In this case, the type for this parameter
 	 * is determined from <code>args</code>.
 	 */
-	public static Object callStaticMethod(Class<?> clazz, String methodName, Class<?>[] parameterTypes, Object... args) {
+	public static Object callStaticMethodBestMatch(Class<?> clazz, String methodName, Class<?>[] parameterTypes, Object... args) {
 		try {
 			return findMethodBestMatch(clazz, methodName, parameterTypes, args).invoke(null, args);
 		} catch (IllegalAccessException e) {
@@ -957,6 +1074,44 @@ public class XposedHelpers {
 		}
 	}
 	
+	public static Object callStaticMethod(Class<?> clazz, String methodName, Class<?>[] parameterTypes, Object... args) {
+		Method method = null;
+		NoSuchMethodError noSuchMethodError = null;
+
+		try {
+			method = findMethodBestMatch(clazz, methodName, parameterTypes, args);
+		} catch (NoSuchMethodError e) {
+			noSuchMethodError = e;
+		}
+
+		while (method == null && (clazz = clazz.getSuperclass()) != null) {
+			try {
+				method = findMethodExact(clazz, methodName, parameterTypes, args);
+				// subclass cannot call supclass's private method
+				if (!Modifier.isPrivate(method.getModifiers())) {
+					break;
+				}
+			} catch (NoSuchMethodError e) {
+			}
+		}
+
+		if (method == null) {
+			throw noSuchMethodError;
+		}
+
+		try {
+			return method.invoke(null, args);
+		} catch (IllegalAccessException e) {
+			// should not happen
+			XposedBridge.log(e);
+			throw new IllegalAccessError(e.getMessage());
+		} catch (IllegalArgumentException e) {
+			throw e;
+		} catch (InvocationTargetException e) {
+			throw new InvocationTargetError(e.getCause());
+		}
+	}
+
 	public static class InvocationTargetError extends Error {
 		private static final long serialVersionUID = -1070936889459514628L;
 		public InvocationTargetError(Throwable cause) {
