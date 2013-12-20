@@ -6,7 +6,7 @@ import static de.robv.android.xposed.XposedHelpers.setObjectField;
 
 import java.io.File;
 import java.util.HashMap;
-import java.util.TreeSet;
+import java.util.LinkedList;
 import java.util.WeakHashMap;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -15,13 +15,16 @@ import android.graphics.Movie;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
+import android.util.AttributeSet;
 import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodHook.MethodHookParam;
 import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedBridge.CopyOnWriteSortedSet;
 import de.robv.android.xposed.callbacks.XC_LayoutInflated;
 import de.robv.android.xposed.callbacks.XC_LayoutInflated.LayoutInflatedParam;
 import de.robv.android.xposed.callbacks.XCallback;
@@ -34,11 +37,19 @@ public class XResources extends MiuiResources {
 	private static final SparseArray<HashMap<String, ResourceNames>> resourceNames
 		= new SparseArray<HashMap<String, ResourceNames>>();
 	
-	private static final SparseArray<HashMap<String, TreeSet<XC_LayoutInflated>>> layoutCallbacks
-		= new SparseArray<HashMap<String, TreeSet<XC_LayoutInflated>>>();
+	private static final SparseArray<HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>>> layoutCallbacks
+		= new SparseArray<HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>>>();
 	private static final WeakHashMap<XmlResourceParser, XMLInstanceDetails> xmlInstanceDetails
 		= new WeakHashMap<XmlResourceParser, XMLInstanceDetails>();
-	
+
+	private static final String EXTRA_XML_INSTANCE_DETAILS = "xmlInstanceDetails";
+	private static final ThreadLocal<LinkedList<MethodHookParam>> sIncludedLayouts = new ThreadLocal<LinkedList<MethodHookParam>>() {
+		@Override
+		protected LinkedList<MethodHookParam> initialValue() {
+			return new LinkedList<MethodHookParam>();
+		}
+	};
+
 	private static final HashMap<String, Long> resDirLastModified = new HashMap<String, Long>();
 	private static final HashMap<String, String> resDirPackageNames = new HashMap<String, String>();
 	private boolean inited = false;
@@ -46,10 +57,12 @@ public class XResources extends MiuiResources {
 	private final String resDir;
 	
 	public XResources(Resources parent, String resDir) {
-		super(parent.getAssets(), null, null, null);
+		super(parent.getAssets(), null, null);
 		this.resDir = resDir;
 		updateConfiguration(parent.getConfiguration(), parent.getDisplayMetrics());
 		setObjectField(this, "mCompatibilityInfo", getObjectField(parent, "mCompatibilityInfo"));
+		if (Build.VERSION.SDK_INT >= 19)
+			setObjectField(this, "mToken", getObjectField(parent, "mToken"));
 	}
 	
 	/** Framework only, don't call this from your module! */
@@ -134,6 +147,33 @@ public class XResources extends MiuiResources {
 				if (details != null) {
 					LayoutInflatedParam liparam = new LayoutInflatedParam(details.callbacks);
 					liparam.view = (View) param.getResult();
+					liparam.resNames = details.resNames;
+					liparam.variant = details.variant;
+					liparam.res = details.res;
+					XCallback.callAll(liparam);
+				}
+			}
+		});
+
+		findAndHookMethod(LayoutInflater.class, "parseInclude", XmlPullParser.class, View.class, AttributeSet.class, new XC_MethodHook() {
+			@Override
+			protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+				sIncludedLayouts.get().push(param);
+			}
+
+			@Override
+			protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+				sIncludedLayouts.get().pop();
+
+				if (param.hasThrowable())
+					return;
+
+				// filled in by our implementation of loadXmlResourceParser
+				XMLInstanceDetails details = (XMLInstanceDetails) param.getObjectExtra(EXTRA_XML_INSTANCE_DETAILS);
+				if (details != null) {
+					LayoutInflatedParam liparam = new LayoutInflatedParam(details.callbacks);
+					ViewGroup group = (ViewGroup) param.args[1];
+					liparam.view = group.getChildAt(group.getChildCount() - 1);
 					liparam.resNames = details.resNames;
 					liparam.variant = details.variant;
 					liparam.res = details.res;
@@ -535,12 +575,12 @@ public class XResources extends MiuiResources {
 		}
 		
 		if (type.equals("layout")) {
-			HashMap<String, TreeSet<XC_LayoutInflated>> inner;
+			HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>> inner;
 			synchronized (layoutCallbacks) {
 				inner = layoutCallbacks.get(id);
 			}
 			if (inner != null) {
-				TreeSet<XC_LayoutInflated> callbacks;
+				CopyOnWriteSortedSet<XC_LayoutInflated> callbacks;
 				synchronized (inner) {
 					callbacks = inner.get(resDir);
 					if (callbacks == null && resDir != null)
@@ -560,13 +600,19 @@ public class XResources extends MiuiResources {
 					} else {
 						XposedBridge.log(new NotFoundException("Could not find file name for resource id 0x") + Integer.toHexString(id));
 					}
-					
+
 					synchronized (xmlInstanceDetails) {
 						synchronized (resourceNames) {
 							HashMap<String, ResourceNames> resNamesInner = resourceNames.get(id);
 							if (resNamesInner != null) {
 								synchronized (resNamesInner) {
-									xmlInstanceDetails.put(result, new XMLInstanceDetails(resNamesInner.get(resDir), variant, callbacks));
+									XMLInstanceDetails details = new XMLInstanceDetails(resNamesInner.get(resDir), variant, callbacks);
+									xmlInstanceDetails.put(result, details);
+
+									// if we were called inside LayoutInflater.parseInclude, store the details for it
+									MethodHookParam top = sIncludedLayouts.get().peek();
+									if (top != null)
+										top.setObjectExtra(EXTRA_XML_INSTANCE_DETAILS, details);
 								}
 							}
 						}
@@ -874,10 +920,10 @@ public class XResources extends MiuiResources {
 	private class XMLInstanceDetails {
 		public final ResourceNames resNames;
 		public final String variant;
-		public final TreeSet<XC_LayoutInflated> callbacks;
+		public final CopyOnWriteSortedSet<XC_LayoutInflated> callbacks;
 		public final XResources res = XResources.this;
 		
-		private XMLInstanceDetails(ResourceNames resNames, String variant, TreeSet<XC_LayoutInflated> callbacks) {
+		private XMLInstanceDetails(ResourceNames resNames, String variant, CopyOnWriteSortedSet<XC_LayoutInflated> callbacks) {
 			this.resNames = resNames;
 			this.variant = variant;
 			this.callbacks = callbacks;
@@ -938,27 +984,25 @@ public class XResources extends MiuiResources {
 		if (id == 0)
 			throw new IllegalArgumentException("id 0 is not an allowed resource identifier");
 
-		HashMap<String, TreeSet<XC_LayoutInflated>> inner;
+		HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>> inner;
 		synchronized (layoutCallbacks) {
 			inner = layoutCallbacks.get(id);
 			if (inner == null) {
-				inner = new HashMap<String, TreeSet<XC_LayoutInflated>>();
+				inner = new HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>>();
 				layoutCallbacks.put(id, inner);
 			}
 		}
 		
-		TreeSet<XC_LayoutInflated> callbacks;
+		CopyOnWriteSortedSet<XC_LayoutInflated> callbacks;
 		synchronized (inner) {
 			callbacks = inner.get(resDir);
 			if (callbacks == null) {
-				callbacks = new TreeSet<XC_LayoutInflated>();
+				callbacks = new CopyOnWriteSortedSet<XC_LayoutInflated>();
 				inner.put(resDir, callbacks);
 			}
 		} 
 		
-		synchronized (callbacks) {
-			callbacks.add(callback);
-		}
+		callbacks.add(callback);
 		
 		putResourceNames(resDir, resNames);
 		
@@ -966,22 +1010,20 @@ public class XResources extends MiuiResources {
 	}
 	
 	public static void unhookLayout(String resDir, int id, XC_LayoutInflated callback) {
-		HashMap<String, TreeSet<XC_LayoutInflated>> inner;
+		HashMap<String, CopyOnWriteSortedSet<XC_LayoutInflated>> inner;
 		synchronized (layoutCallbacks) {
 			inner = layoutCallbacks.get(id);
 			if (inner == null)
 				return;
 		}
 		
-		TreeSet<XC_LayoutInflated> callbacks;
+		CopyOnWriteSortedSet<XC_LayoutInflated> callbacks;
 		synchronized (inner) {
 			callbacks = inner.get(resDir);
 			if (callbacks == null)
 				return;
 		} 
 		
-		synchronized (callbacks) {
-			callbacks.remove(callback);
-		}
+		callbacks.remove(callback);
 	}
 }

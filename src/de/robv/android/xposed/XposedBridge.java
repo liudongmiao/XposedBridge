@@ -23,13 +23,12 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Member;
 import java.lang.reflect.Method;
 import java.text.DateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -44,6 +43,7 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.XResources;
 import android.os.Build;
+import android.os.IBinder;
 import android.os.Process;
 import android.util.Log;
 
@@ -73,11 +73,13 @@ public final class XposedBridge {
 	public static final String BASE_DIR = "/data/data/" + INSTALLER_PACKAGE_NAME + "/";
 
 	// built-in handlers
-	private static final Map<Member, TreeSet<XC_MethodHook>> hookedMethodCallbacks
-									= new HashMap<Member, TreeSet<XC_MethodHook>>();
-	private static final TreeSet<XC_LoadPackage> loadedPackageCallbacks = new TreeSet<XC_LoadPackage>();
-	private static final TreeSet<XC_InitPackageResources> initPackageResourcesCallbacks = new TreeSet<XC_InitPackageResources>();
-	
+	private static final Map<Member, CopyOnWriteSortedSet<XC_MethodHook>> hookedMethodCallbacks
+									= new HashMap<Member, CopyOnWriteSortedSet<XC_MethodHook>>();
+	private static final CopyOnWriteSortedSet<XC_LoadPackage> loadedPackageCallbacks
+									= new CopyOnWriteSortedSet<XC_LoadPackage>();
+	private static final CopyOnWriteSortedSet<XC_InitPackageResources> initPackageResourcesCallbacks
+									= new CopyOnWriteSortedSet<XC_InitPackageResources>();
+
 	/**
 	 * Called when native methods and other things are initialized, but before preloading classes etc.
 	 */
@@ -116,6 +118,7 @@ public final class XposedBridge {
 		} catch (Throwable t) {
 			log("Errors during Xposed initialization");
 			log(t);
+			disableHooks = true;
 		}
 		
 		// call the original startup code
@@ -209,7 +212,8 @@ public final class XposedBridge {
 		});
 		
 		// system thread initialization
-		findAndHookMethod("com.android.server.ServerThread", null, "run", new XC_MethodHook() {
+		findAndHookMethod("com.android.server.ServerThread", null,
+				Build.VERSION.SDK_INT < 19 ? "run" : "initAndLoop", new XC_MethodHook() {
 			@Override
 			protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
 				loadedPackagesInProcess.add("android");
@@ -275,7 +279,7 @@ public final class XposedBridge {
 					String.class, CompatibilityInfo.class,
 					callbackGetTopLevelResources);
 			}
-		} else {
+		} else if (Build.VERSION.SDK_INT <= 18) {
 			try {
 				findAndHookMethod(ActivityThread.class, "getTopLevelResources",
 					String.class, int.class, Configuration.class, CompatibilityInfo.class, boolean.class,
@@ -285,6 +289,10 @@ public final class XposedBridge {
 					String.class, int.class, Configuration.class, CompatibilityInfo.class,
 					callbackGetTopLevelResources);
 			}
+		} else {
+			findAndHookMethod("android.app.ResourcesManager", null, "getTopLevelResources",
+					String.class, int.class, Configuration.class, CompatibilityInfo.class, IBinder.class,
+					callbackGetTopLevelResources);
 		}
 
 		// Replace system resources
@@ -430,22 +438,32 @@ public final class XposedBridge {
 		}
 		
 		boolean newMethod = false;
-		TreeSet<XC_MethodHook> callbacks;
+		CopyOnWriteSortedSet<XC_MethodHook> callbacks;
 		synchronized (hookedMethodCallbacks) {
 			callbacks = hookedMethodCallbacks.get(hookMethod);
 			if (callbacks == null) {
-				callbacks = new TreeSet<XC_MethodHook>();
+				callbacks = new CopyOnWriteSortedSet<XC_MethodHook>();
 				hookedMethodCallbacks.put(hookMethod, callbacks);
 				newMethod = true;
 			}
 		}
-		synchronized (callbacks) {
-			callbacks.add(callback);
-		}
+		callbacks.add(callback);
 		if (newMethod) {
 			Class<?> declaringClass = hookMethod.getDeclaringClass();
 			int slot = (int) getIntField(hookMethod, "slot");
-			hookMethodNative(declaringClass, slot);
+
+			Class<?>[] parameterTypes;
+			Class<?> returnType;
+			if (hookMethod instanceof Method) {
+				parameterTypes = ((Method) hookMethod).getParameterTypes();
+				returnType = ((Method) hookMethod).getReturnType();
+			} else {
+				parameterTypes = ((Constructor<?>) hookMethod).getParameterTypes();
+				returnType = null;
+			}
+
+			AdditionalHookInfo additionalInfo = new AdditionalHookInfo(callbacks, parameterTypes, returnType);
+			hookMethodNative(hookMethod, declaringClass, slot, additionalInfo);
 		}
 		
 		return callback.new Unhook(hookMethod);
@@ -457,15 +475,13 @@ public final class XposedBridge {
 	 * @param callback The reference to the callback as specified in {@link #hookMethod}
 	 */
 	public static void unhookMethod(Member hookMethod, XC_MethodHook callback) {
-		TreeSet<XC_MethodHook> callbacks;
+		CopyOnWriteSortedSet<XC_MethodHook> callbacks;
 		synchronized (hookedMethodCallbacks) {
 			callbacks = hookedMethodCallbacks.get(hookMethod);
 			if (callbacks == null)
 				return;
 		}	
-		synchronized (callbacks) {
-			callbacks.remove(callback);
-		}
+		callbacks.remove(callback);
 	}
 	
 	public static Set<XC_MethodHook.Unhook> hookAllMethods(Class<?> hookClass, String methodName, XC_MethodHook callback) {
@@ -486,89 +502,85 @@ public final class XposedBridge {
 	/**
 	 * This method is called as a replacement for hooked methods.
 	 */
-	@SuppressWarnings("unchecked")
-	private static Object handleHookedMethod(Member method, Object thisObject, Object[] args) throws Throwable {
+	private static Object handleHookedMethod(Member method, int originalMethodId, Object additionalInfoObj,
+			Object thisObject, Object[] args) throws Throwable {
+		AdditionalHookInfo additionalInfo = (AdditionalHookInfo) additionalInfoObj;
+
 		if (disableHooks) {
 			try {
-				return invokeOriginalMethod(method, thisObject, args);
+				return invokeOriginalMethodNative(method, originalMethodId, additionalInfo.parameterTypes,
+						additionalInfo.returnType, thisObject, args);
 			} catch (InvocationTargetException e) {
 				throw e.getCause();
 			}
 		}
 
-		TreeSet<XC_MethodHook> callbacks;
-		synchronized (hookedMethodCallbacks) {
-			callbacks = hookedMethodCallbacks.get(method);
-		}
-		if (callbacks == null || callbacks.isEmpty()) {
+		Object[] callbacksSnapshot = additionalInfo.callbacks.getSnapshot();
+		final int callbacksLength = callbacksSnapshot.length;
+		if (callbacksLength == 0) {
 			try {
-				return invokeOriginalMethod(method, thisObject, args);
+				return invokeOriginalMethodNative(method, originalMethodId, additionalInfo.parameterTypes,
+						additionalInfo.returnType, thisObject, args);
 			} catch (InvocationTargetException e) {
 				throw e.getCause();
 			}
 		}
-		synchronized (callbacks) {
-			callbacks = ((TreeSet<XC_MethodHook>) callbacks.clone());
-		}
-		
+
 		MethodHookParam param = new MethodHookParam();
 		param.method  = method;
 		param.thisObject = thisObject;
 		param.args = args;
-		
-		Iterator<XC_MethodHook> before = callbacks.iterator();
-		Iterator<XC_MethodHook> after  = callbacks.descendingIterator();
-		
+
 		// call "before method" callbacks
-		while (before.hasNext()) {
+		int beforeIdx = 0;
+		do {
 			try {
-				before.next().beforeHookedMethod(param);
+				((XC_MethodHook) callbacksSnapshot[beforeIdx]).beforeHookedMethod(param);
 			} catch (Throwable t) {
 				XposedBridge.log(t);
-				
+
 				// reset result (ignoring what the unexpectedly exiting callback did)
 				param.setResult(null);
 				param.returnEarly = false;
 				continue;
 			}
-			
-	        if (param.returnEarly) {
-	        	// skip remaining "before" callbacks and corresponding "after" callbacks
-	        	while (before.hasNext() && after.hasNext()) {
-	        		before.next();
-	        		after.next();
-	        	}
-	        	break;
-	        }
-		}
-		
+
+			if (param.returnEarly) {
+				// skip remaining "before" callbacks and corresponding "after" callbacks
+				beforeIdx++;
+				break;
+			}
+		} while (++beforeIdx < callbacksLength);
+
 		// call original method if not requested otherwise
 		if (!param.returnEarly) {
 			try {
-				param.setResult(invokeOriginalMethod(method, param.thisObject, param.args));
+				param.setResult(invokeOriginalMethodNative(method, originalMethodId,
+						additionalInfo.parameterTypes, additionalInfo.returnType, param.thisObject, param.args));
 			} catch (InvocationTargetException e) {
 				param.setThrowable(e.getCause());
 			}
 		}
-		
+
 		// call "after method" callbacks
-		while (after.hasNext()) {
+		int afterIdx = beforeIdx - 1;
+		do {
 			Object lastResult =  param.getResult();
 			Throwable lastThrowable = param.getThrowable();
-			
+
 			try {
-				after.next().afterHookedMethod(param);
+				((XC_MethodHook) callbacksSnapshot[afterIdx]).afterHookedMethod(param);
 			} catch (Throwable t) {
 				XposedBridge.log(t);
-				
+
 				// reset to last result (ignoring what the unexpectedly exiting callback did)
 				if (lastThrowable == null)
 					param.setResult(lastResult);
 				else
 					param.setThrowable(lastThrowable);
 			}
-		}
-		
+		} while (--afterIdx >= 0);
+
 		// return
 		if (param.hasThrowable())
 			throw param.getThrowable();
@@ -622,7 +634,6 @@ public final class XposedBridge {
 				
 			} else if (result != null) {
 				// replace the returned resources with our subclass
-				ActivityThread thisActivityThread = (ActivityThread) param.thisObject;
 				Resources origRes = (Resources) result;
 				String resDir = (String) param.args[0];
 				CompatibilityInfo compInfo = (CompatibilityInfo)
@@ -630,15 +641,22 @@ public final class XposedBridge {
 				
 				newRes = new XResources(origRes, resDir);
 				
+				@SuppressWarnings("unchecked")
 				Map<Object, WeakReference<Resources>> mActiveResources =
-						(Map<Object, WeakReference<Resources>>) AndroidAppHelper.getActivityThread_mActiveResources(thisActivityThread);
-				Object mPackages = AndroidAppHelper.getActivityThread_mPackages(thisActivityThread);
-				
-				Object key = (Build.VERSION.SDK_INT <= 16)
-					? AndroidAppHelper.createResourcesKey(resDir, compInfo)
-					: AndroidAppHelper.createResourcesKey(resDir, (Integer) param.args[1], (Configuration) param.args[2], compInfo);
-				
-				synchronized (mPackages) {
+						(Map<Object, WeakReference<Resources>>) getObjectField(param.thisObject, "mActiveResources");
+				Object lockObject = (Build.VERSION.SDK_INT <= 18)
+						? getObjectField(param.thisObject, "mPackages") : param.thisObject;
+
+				Object key;
+				if (Build.VERSION.SDK_INT <= 16)
+					key = AndroidAppHelper.createResourcesKey(resDir, compInfo);
+				else if (Build.VERSION.SDK_INT <= 18)
+					key = AndroidAppHelper.createResourcesKey(resDir, (Integer) param.args[1], (Configuration) param.args[2], compInfo);
+				else
+					key = AndroidAppHelper.createResourcesKey(resDir, (Integer) param.args[1],
+							(Configuration) param.args[2], compInfo, (IBinder) param.args[4]);
+
+				synchronized (lockObject) {
 					WeakReference<Resources> existing = mActiveResources.get(key);
 					if (existing != null && existing.get() != null && existing.get().getAssets() != newRes.getAssets())
 						existing.get().getAssets().close();
@@ -671,11 +689,20 @@ public final class XposedBridge {
 	 * Intercept every call to the specified method and call a handler function instead.
 	 * @param method The method to intercept
 	 */
+	private native synchronized static void hookMethodNative(Member method, Class<?> declaringClass, int slot, Object additionalInfo);
+
+	private native static Object invokeOriginalMethodNative(Member method, int methodId,
+			Class<?>[] parameterTypes, Class<?> returnType, Object thisObject, Object[] args)
+			throws IllegalAccessException, IllegalArgumentException, InvocationTargetException;
+
+	/** Old method signature to avoid crashes if only XposedBridge.jar is updated, will be removed in the next version */
+	@Deprecated
 	private native synchronized static void hookMethodNative(Class<?> declaringClass, int slot);
-	
+
+	@Deprecated
 	private native static Object invokeOriginalMethodNative(Member method, Class<?>[] parameterTypes, Class<?> returnType, Object thisObject, Object[] args)
-    			throws IllegalAccessException, IllegalArgumentException, InvocationTargetException;
-	
+			throws IllegalAccessException, IllegalArgumentException, InvocationTargetException;
+
 	/**
 	 * Basically the same as {@link Method#invoke}, but calls the original method
 	 * as it was before the interception by Xposed. Also, access permissions are not checked.
@@ -684,36 +711,89 @@ public final class XposedBridge {
 	 * @param thisObject For non-static calls, the "this" pointer
 	 * @param args Arguments for the method call as Object[] array
 	 * @return The result returned from the invoked method
-     * @throws NullPointerException
-     *             if {@code receiver == null} for a non-static method
-     * @throws IllegalAccessException
-     *             if this method is not accessible (see {@link AccessibleObject})
-     * @throws IllegalArgumentException
-     *             if the number of arguments doesn't match the number of parameters, the receiver
-     *             is incompatible with the declaring class, or an argument could not be unboxed
-     *             or converted by a widening conversion to the corresponding parameter type
-     * @throws InvocationTargetException
-     *             if an exception was thrown by the invoked method
+	 * @throws NullPointerException
+	 *             if {@code receiver == null} for a non-static method
+	 * @throws IllegalAccessException
+	 *             if this method is not accessible (see {@link AccessibleObject})
+	 * @throws IllegalArgumentException
+	 *             if the number of arguments doesn't match the number of parameters, the receiver
+	 *             is incompatible with the declaring class, or an argument could not be unboxed
+	 *             or converted by a widening conversion to the corresponding parameter type
+	 * @throws InvocationTargetException
+	 *             if an exception was thrown by the invoked method
 
 	 */
 	public static Object invokeOriginalMethod(Member method, Object thisObject, Object[] args)
-				throws NullPointerException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
-        if (args == null) {
-            args = EMPTY_ARRAY;
-        }
-        
-        Class<?>[] parameterTypes;
-        Class<?> returnType;
-        if (method instanceof Method) {
-        	parameterTypes = ((Method) method).getParameterTypes();
-        	returnType = ((Method) method).getReturnType();
-        } else if (method instanceof Constructor) {
-        	parameterTypes = ((Constructor<?>) method).getParameterTypes();
-        	returnType = null;
-        } else {
-        	throw new IllegalArgumentException("method must be of type Method or Constructor");
-        }
-        	
-		return invokeOriginalMethodNative(method, parameterTypes, returnType, thisObject, args);
+			throws NullPointerException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+		if (args == null) {
+			args = EMPTY_ARRAY;
+		}
+
+		Class<?>[] parameterTypes;
+		Class<?> returnType;
+		if (method instanceof Method) {
+			parameterTypes = ((Method) method).getParameterTypes();
+			returnType = ((Method) method).getReturnType();
+		} else if (method instanceof Constructor) {
+			parameterTypes = ((Constructor<?>) method).getParameterTypes();
+			returnType = null;
+		} else {
+			throw new IllegalArgumentException("method must be of type Method or Constructor");
+		}
+
+		return invokeOriginalMethodNative(method, 0, parameterTypes, returnType, thisObject, args);
+	}
+
+	public static class CopyOnWriteSortedSet<E> {
+		private transient volatile Object[] elements = EMPTY_ARRAY;
+
+		public synchronized boolean add(E e) {
+			int index = indexOf(e);
+			if (index >= 0)
+				return false;
+
+			Object[] newElements = new Object[elements.length + 1];
+			System.arraycopy(elements, 0, newElements, 0, elements.length);
+			newElements[elements.length] = e;
+			Arrays.sort(newElements);
+			elements = newElements;
+			return true;
+		}
+
+		public synchronized boolean remove(E e) {
+			int index = indexOf(e);
+			if (index == -1)
+				return false;
+
+			Object[] newElements = new Object[elements.length - 1];
+			System.arraycopy(elements, 0, newElements, 0, index);
+			System.arraycopy(elements, index + 1, newElements, index, elements.length - index - 1);
+			elements = newElements;
+			return true;
+		}
+
+		private int indexOf(Object o) {
+			for (int i = 0; i < elements.length; i++) {
+				if (o.equals(elements[i]))
+					return i;
+			}
+			return -1;
+		}
+
+		public Object[] getSnapshot() {
+			return elements;
+		}
+	}
+
+	private static class AdditionalHookInfo {
+		final CopyOnWriteSortedSet<XC_MethodHook> callbacks;
+		final Class<?>[] parameterTypes;
+		final Class<?> returnType;
+
+		private AdditionalHookInfo(CopyOnWriteSortedSet<XC_MethodHook> callbacks, Class<?>[] parameterTypes, Class<?> returnType) {
+			this.callbacks = callbacks;
+			this.parameterTypes = parameterTypes;
+			this.returnType = returnType;
+		}
 	}
 }
