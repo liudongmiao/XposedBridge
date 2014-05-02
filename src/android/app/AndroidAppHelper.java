@@ -33,14 +33,10 @@ public class AndroidAppHelper {
 		} catch (Throwable t) { XposedBridge.log(t); }
 	}
 	
-	public static Map<String, WeakReference<LoadedApk>> getActivityThread_mPackages(ActivityThread activityThread) {
-		return activityThread.mPackages;
-	}
-	
 	@SuppressWarnings({ "unchecked", "rawtypes" })
 	public static Map<Object, WeakReference<Resources>> getActivityThread_mActiveResources(ActivityThread activityThread) {
 		if (Build.VERSION.SDK_INT <= 18) {
-			return (Map) activityThread.mActiveResources;
+			return (Map) getObjectField(activityThread, "mActiveResources");
 		} else {
 			Object resourcesManager = getObjectField(activityThread, "mResourcesManager");
 			return (Map) getObjectField(resourcesManager, "mActiveResources");
