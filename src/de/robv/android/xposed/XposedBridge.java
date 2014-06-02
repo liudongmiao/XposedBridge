@@ -6,6 +6,7 @@ import static de.robv.android.xposed.XposedHelpers.getIntField;
 import static de.robv.android.xposed.XposedHelpers.getObjectField;
 import static de.robv.android.xposed.XposedHelpers.setObjectField;
 import static de.robv.android.xposed.XposedHelpers.setStaticObjectField;
+import static de.robv.android.xposed.XposedHelpers.callMethod;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -195,19 +196,19 @@ public final class XposedBridge {
 
 				setObjectField(activityThread, "mBoundApplication", param.args[0]);
 				loadedPackagesInProcess.add(appInfo.packageName);
-				LoadedApk loadedApk;
+				Object loadedApk;
 				if (Build.VERSION.SDK_INT > Build.VERSION_CODES.GINGERBREAD_MR1) {
 					CompatibilityInfo compatInfo = (CompatibilityInfo) getObjectField(param.args[0], "compatInfo");
 					loadedApk = activityThread.getPackageInfoNoCheck(appInfo, compatInfo);
 				} else {
 					loadedApk = activityThread.getPackageInfoNoCheck(appInfo);
 				}
-				XResources.setPackageNameForResDir(appInfo.packageName, loadedApk.getResDir());
+				XResources.setPackageNameForResDir(appInfo.packageName, (String) callMethod(loadedApk, "getResDir"));
 
 				LoadPackageParam lpparam = new LoadPackageParam(sLoadedPackageCallbacks);
 				lpparam.packageName = appInfo.packageName;
 				lpparam.processName = (String) getObjectField(param.args[0], "processName");
-				lpparam.classLoader = loadedApk.getClassLoader();
+				lpparam.classLoader = (ClassLoader) callMethod(loadedApk, "getClassLoader");
 				lpparam.appInfo = appInfo;
 				lpparam.isFirstApplication = true;
 				XC_LoadPackage.callAll(lpparam);
@@ -235,13 +236,19 @@ public final class XposedBridge {
 		});
 
 		// when a package is loaded for an existing process, trigger the callbacks as well
-		hookAllConstructors(LoadedApk.class, new XC_MethodHook() {
+		Class<?> LoadedApk;
+		if (Build.VERSION.SDK_INT > Build.VERSION_CODES.GINGERBREAD_MR1) {
+			LoadedApk = LoadedApk.class;
+		} else {
+			LoadedApk = Class.forName("android.app.LoadedApk");
+		}
+		hookAllConstructors(LoadedApk, new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-				LoadedApk loadedApk = (LoadedApk) param.thisObject;
+				Object loadedApk = param.thisObject;
 
-				String packageName = loadedApk.getPackageName();
-				XResources.setPackageNameForResDir(packageName, loadedApk.getResDir());
+				String packageName = (String) callMethod(loadedApk, "getPackageName");
+				XResources.setPackageNameForResDir(packageName, (String) callMethod(loadedApk, "getResDir"));
 				if (packageName.equals("android") || !loadedPackagesInProcess.add(packageName))
 					return;
 
@@ -251,8 +258,8 @@ public final class XposedBridge {
 				LoadPackageParam lpparam = new LoadPackageParam(sLoadedPackageCallbacks);
 				lpparam.packageName = packageName;
 				lpparam.processName = AndroidAppHelper.currentProcessName();
-				lpparam.classLoader = loadedApk.getClassLoader();
-				lpparam.appInfo = loadedApk.getApplicationInfo();
+				lpparam.classLoader = (ClassLoader) callMethod(loadedApk, "getClassLoader");
+				lpparam.appInfo = (ApplicationInfo) callMethod(loadedApk, "getApplicationInfo");
 				lpparam.isFirstApplication = false;
 				XC_LoadPackage.callAll(lpparam);
 			}
