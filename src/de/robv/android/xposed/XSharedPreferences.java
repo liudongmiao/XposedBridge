@@ -61,7 +61,7 @@ public final class XSharedPreferences implements SharedPreferences {
 		synchronized (this) {
 			mLoaded = false;
 		}
-		new Thread("XSharedPreferences-load") {
+		new Thread("SamplingProfiler") {
 			@Override
 			public void run() {
 				synchronized (XSharedPreferences.this) {
