@@ -200,7 +200,7 @@ public final class XposedBridge {
 					CompatibilityInfo compatInfo = (CompatibilityInfo) getObjectField(param.args[0], "compatInfo");
 					loadedApk = activityThread.getPackageInfoNoCheck(appInfo, compatInfo);
 				} else {
-					loadedApk = activityThread.getPackageInfoNoCheck(appInfo);
+					loadedApk = callMethod(activityThread, "getPackageInfoNoCheck", appInfo);
 				}
 				XResources.setPackageNameForResDir(appInfo.packageName, (String) callMethod(loadedApk, "getResDir"));
 
