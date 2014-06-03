@@ -37,7 +37,6 @@ import java.util.zip.ZipInputStream;
 import android.annotation.SuppressLint;
 import android.app.ActivityThread;
 import android.app.AndroidAppHelper;
-import android.app.LoadedApk;
 import android.content.ComponentName;
 import android.content.pm.ApplicationInfo;
 import android.content.res.CompatibilityInfo;
@@ -236,12 +235,7 @@ public final class XposedBridge {
 		});
 
 		// when a package is loaded for an existing process, trigger the callbacks as well
-		Class<?> LoadedApk;
-		if (Build.VERSION.SDK_INT > Build.VERSION_CODES.GINGERBREAD_MR1) {
-			LoadedApk = LoadedApk.class;
-		} else {
-			LoadedApk = Class.forName("android.app.LoadedApk");
-		}
+		Class<?> LoadedApk = Class.forName("android.app.LoadedApk");
 		hookAllConstructors(LoadedApk, new XC_MethodHook() {
 			@Override
 			protected void afterHookedMethod(MethodHookParam param) throws Throwable {
